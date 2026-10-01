@@ -1,201 +1,292 @@
 'use client';
 
-import { useEffect, useState, use } from 'react';
+import { useState, useEffect, FormEvent } from 'react';
+import { useParams, useRouter } from 'next/navigation';
 import { db } from '@/lib/firebase';
-import { doc, getDoc } from 'firebase/firestore';
-import Link from 'next/link';
-import { OrdemServico, ItemOS } from '@/types/os';
+import { doc, getDoc, updateDoc, collection, getDocs, query, orderBy } from 'firebase/firestore';
+import { useAuth } from '@/context/AuthContext';
+import RotaProtegida from '@/components/RotaProtegida';
+import { ItemOS, TipoItem, ItemCatalogo } from '@/types/os';
+import { DadosOficina } from '@/types/oficina';
+import FormularioOS from '@/components/FormularioOS';
+import ImpressaoOS from '@/components/ImpressaoOS';
 
-interface PageProps {
-  params: Promise<{ id: string }>;
+export default function DetalhesOSPage() {
+  return (
+    <RotaProtegida>
+      <ConteudoOS />
+    </RotaProtegida>
+  );
 }
 
-export default function DetalhesOS({ params }: PageProps) {
-  const resolvedParams = use(params);
-  const id = resolvedParams.id;
+function ConteudoOS() {
+  const { id } = useParams();
+  const router = useRouter();
+  const { userData } = useAuth();
+  const isAdmin = userData?.role === 'admin';
 
-  const [os, setOs] = useState<OrdemServico | null>(null);
-  const [carregando, setCarregando] = useState<boolean>(true);
+  const [carregando, setCarregando] = useState(true);
+  const [salvando, setSalvando] = useState(false);
+  
 
+  // Dados da Oficina
+  const [dadosOficina, setDadosOficina] = useState<DadosOficina | null>(null);
+
+  // Dados da OS
+  const [cliente, setCliente] = useState('');
+  const [telefone, setTelefone] = useState('');
+  const [veiculo, setVeiculo] = useState('');
+  const [placa, setPlaca] = useState('');
+  const [ano, setAno] = useState('');
+  const [km, setKm] = useState('');
+  const [status, setStatus] = useState('Aberto');
+  const [criadoEm, setCriadoEm] = useState('');
+  const [itens, setItens] = useState<ItemOS[]>([]);
+  const [defeitoRelatado, setDefeitoRelatado] = useState('');
+  const [obsMecanico, setObsMecanico] = useState('');
+
+  // Modal do Catálogo
+  const [modalAberto, setModalAberto] = useState(false);
+  const [catalogo, setCatalogo] = useState<ItemCatalogo[]>([]);
+  const [buscaCatalogo, setBuscaCatalogo] = useState('');
+
+  // Carrega OS e Configurações da Oficina
   useEffect(() => {
-    async function buscarOS() {
+    async function carregarDados() {
+      if (!id) return;
       try {
-        const docRef = doc(db, 'ordens_servico', id);
-        const docSnap = await getDoc(docRef);
+        // Carrega OS
+        const docRefOS = doc(db, 'ordens_servico', id as string);
+        const snapOS = await getDoc(docRefOS);
 
-        if (docSnap.exists()) {
-          setOs({ id: docSnap.id, ...docSnap.data() } as OrdemServico);
+        if (snapOS.exists()) {
+          const dados = snapOS.data();
+          setCliente(dados.cliente || '');
+          setTelefone(dados.telefone || '');
+          setVeiculo(dados.veiculo || '');
+          setAno(dados.ano || '');
+          setPlaca(dados.placa || '');
+          setKm(dados.km || '');
+          setStatus(dados.status || 'Aberto');
+          setItens(dados.itens || []);
+          setDefeitoRelatado(dados.defeitoRelatado || '');
+          setObsMecanico(dados.obsMecanico || '');
+
+          if (dados.criadoEm) {
+            const dataObj = dados.criadoEm.toDate ? dados.criadoEm.toDate() : new Date(dados.criadoEm);
+            setCriadoEm(dataObj.toLocaleDateString('pt-BR'));
+          } else {
+            setCriadoEm(new Date().toLocaleDateString('pt-BR'));
+          }
         } else {
-          console.error('OS não encontrada');
+          alert('Ordem de Serviço não encontrada.');
+          router.push('/');
+        }
+
+        // Carrega dados da Oficina
+        const docRefOficina = doc(db, 'configuracoes', 'oficina');
+        const snapOficina = await getDoc(docRefOficina);
+        if (snapOficina.exists()) {
+          setDadosOficina(snapOficina.data() as DadosOficina);
         }
       } catch (error) {
-        console.error('Erro ao buscar OS:', error);
+        console.error('Erro ao carregar dados:', error);
       } finally {
         setCarregando(false);
       }
     }
+    carregarDados();
+  }, [id, router]);
 
-    if (id) buscarOS();
-  }, [id]);
+  // Carrega Catálogo
+  useEffect(() => {
+    async function carregarCatalogo() {
+      try {
+        const q = query(collection(db, 'catalogo'), orderBy('descricao', 'asc'));
+        const querySnapshot = await getDocs(q);
+        const lista: ItemCatalogo[] = [];
+        querySnapshot.forEach((docSnap) => {
+          lista.push({ id: docSnap.id, ...docSnap.data() } as ItemCatalogo);
+        });
+        setCatalogo(lista);
+      } catch (error) {
+        console.error('Erro ao carregar catálogo:', error);
+      }
+    }
+    carregarCatalogo();
+  }, []);
+
+  const adicionarItemManual = () => {
+    setItens([...itens, { tipo: 'Serviço', descricao: '', quantidade: 1, valorUnitario: 0 }]);
+  };
+
+  const removerItem = (index: number) => {
+    setItens(itens.filter((_, i) => i !== index));
+  };
+
+  const atualizarItem = (index: number, campo: keyof ItemOS, valor: any) => {
+    const novosItens = [...itens];
+    novosItens[index] = { ...novosItens[index], [campo]: valor };
+    setItens(novosItens);
+  };
+
+  const toggleItemCatalogo = (itemCat: ItemCatalogo) => {
+    const jaExiste = itens.some((i) => i.descricao === itemCat.descricao);
+    if (jaExiste) {
+      setItens(itens.filter((i) => i.descricao !== itemCat.descricao));
+    } else {
+      setItens([
+        ...itens,
+        {
+          tipo: itemCat.tipo,
+          descricao: itemCat.descricao,
+          quantidade: 1,
+          valorUnitario: 0,
+        },
+      ]);
+    }
+  };
+
+  const totalServicos = itens
+    .filter((item) => item.tipo === 'Serviço')
+    .reduce((acc, item) => acc + (Number(item.quantidade) || 0) * (Number(item.valorUnitario) || 0), 0);
+
+  const totalPecas = itens
+    .filter((item) => item.tipo === 'Peça')
+    .reduce((acc, item) => acc + (Number(item.quantidade) || 0) * (Number(item.valorUnitario) || 0), 0);
+
+  const valorTotal = totalServicos + totalPecas;
+
+  const handleSalvar = async (e: FormEvent) => {
+    e.preventDefault();
+    setSalvando(true);
+
+    try {
+      const docRef = doc(db, 'ordens_servico', id as string);
+
+      const dadosAtualizados = isAdmin
+        ? {
+            cliente,
+            telefone,
+            veiculo,
+            ano,
+            placa: placa.toUpperCase(),
+            km: Number(km) || 0,
+            status,
+            itens,
+            totalServicos,
+            totalPecas,
+            valorTotal,
+          }
+        : {
+            defeitoRelatado,
+            obsMecanico,
+            itens,
+            totalServicos,
+            totalPecas,
+            valorTotal,
+          };
+
+      await updateDoc(docRef, dadosAtualizados);
+      alert('Ordem de Serviço atualizada com sucesso!');
+    } catch (error) {
+      console.error('Erro ao atualizar OS:', error);
+      alert('Erro ao salvar as alterações.');
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  const catalogoFiltrado = catalogo.filter((i) =>
+    i.descricao.toLowerCase().includes(buscaCatalogo.toLowerCase())
+  );
 
   if (carregando) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100 text-gray-800">
-        <p className="text-lg font-medium">Carregando dados da Ordem de Serviço...</p>
+      <div className="min-h-screen flex items-center justify-center bg-gray-100">
+        <div className="text-gray-600 font-medium">Carregando dados da OS...</div>
       </div>
     );
   }
-
-  if (!os) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100 text-gray-800 gap-4">
-        <p className="text-xl font-bold text-red-600">Ordem de Serviço não encontrada.</p>
-        <Link href="/" className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">
-          Voltar ao Início
-        </Link>
-      </div>
-    );
-  }
-
-  const servicos = os.itens?.filter((item: ItemOS) => item.tipo === 'Serviço') || [];
-  const pecas = os.itens?.filter((item: ItemOS) => item.tipo === 'Peça') || [];
 
   return (
-    <main className="min-h-screen bg-gray-100 p-4 md:p-8 text-gray-900 print:bg-white print:p-0">
-      <div className="max-w-4xl mx-auto mb-6 flex justify-between items-center print:hidden">
-        <Link
-          href="/"
-          className="bg-gray-600 text-white px-4 py-2 rounded-md font-medium hover:bg-gray-700 transition"
-        >
-          ← Voltar
-        </Link>
-        <button
-          onClick={() => window.print()}
-          className="bg-green-600 text-white px-6 py-2 rounded-md font-semibold hover:bg-green-700 transition flex items-center gap-2"
-        >
-          🖨️ Imprimir / Salvar PDF
-        </button>
-      </div>
+    <>
+      <style jsx global>{`
+        @media print {
+          body {
+            background: white !important;
+            color: black !important;
+            font-family: 'Courier New', Courier, monospace, sans-serif !important;
+            font-size: 12px !important;
+          }
+          nav, .no-print {
+            display: none !important;
+          }
+          .print-only {
+            display: block !important;
+          }
+        }
+        @media screen {
+          .print-only {
+            display: none !important;
+          }
+        }
+      `}</style>
 
-      <div className="max-w-4xl mx-auto bg-white p-8 rounded-xl shadow-md border border-gray-200 print:shadow-none print:border-none print:max-w-full print:p-0">
-        <div className="flex justify-between items-start border-b pb-4 mb-6">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900 uppercase">Oficina Mecânica</h1>
-            <p className="text-sm text-gray-600">Rua das Oficinas, 123 - Centro</p>
-            <p className="text-sm text-gray-600">Tel / WhatsApp: (41) 99999-8888</p>
-          </div>
-          <div className="text-right">
-            <span className="inline-block bg-blue-100 text-blue-800 font-bold text-sm px-3 py-1 rounded-full border border-blue-300 print:border-gray-400">
-              Nº OS: {os.id?.substring(0, 8).toUpperCase()}
-            </span>
-            <p className="text-xs text-gray-500 mt-2">
-              Data: {os.criadoEm?.toDate ? new Date(os.criadoEm.toDate()).toLocaleDateString('pt-BR') : new Date().toLocaleDateString('pt-BR')}
-            </p>
-          </div>
-        </div>
+      {/* Componente de Impressão */}
+      <ImpressaoOS
+        id={id as string}
+        criadoEm={criadoEm}
+        cliente={cliente}
+        telefone={telefone}
+        veiculo={veiculo}
+        ano={ano}
+        placa={placa}
+        km={km}
+        status={status}
+        itens={itens}
+        dadosOficina={dadosOficina}
+      />
 
-        <div className="grid grid-cols-2 gap-4 mb-6 bg-gray-50 p-4 rounded-lg border border-gray-200 text-sm">
-          <div>
-            <p><strong className="text-gray-700">Cliente:</strong> {os.cliente}</p>
-            <p><strong className="text-gray-700">Telefone:</strong> {os.telefone || 'Não informado'}</p>
-          </div>
-          <div>
-            <p><strong className="text-gray-700">Veículo:</strong> {os.veiculo}</p>
-            <p><strong className="text-gray-700">Placa:</strong> <span className="uppercase font-mono">{os.placa}</span> | <strong className="text-gray-700">KM:</strong> {os.km} km</p>
-          </div>
-        </div>
-
-        {servicos.length > 0 && (
-          <div className="mb-6">
-            <h2 className="text-md font-bold text-gray-800 bg-gray-100 p-2 rounded border border-gray-200 mb-2 uppercase text-xs tracking-wider">
-              1. Mão de Obra e Serviços
-            </h2>
-            <table className="w-full text-left text-sm border-collapse">
-              <thead>
-                <tr className="border-b text-gray-600">
-                  <th className="py-2">Descrição</th>
-                  <th className="py-2 text-center w-20">Qtd</th>
-                  <th className="py-2 text-right w-28">Val. Unit.</th>
-                  <th className="py-2 text-right w-28">Subtotal</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {servicos.map((item: ItemOS, index: number) => {
-                  const subtotal = (Number(item.quantidade) || 0) * (Number(item.valorUnitario) || 0);
-                  return (
-                    <tr key={index}>
-                      <td className="py-2">{item.descricao}</td>
-                      <td className="py-2 text-center">{item.quantidade}</td>
-                      <td className="py-2 text-right">R$ {Number(item.valorUnitario).toFixed(2)}</td>
-                      <td className="py-2 text-right font-medium">R$ {subtotal.toFixed(2)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {pecas.length > 0 && (
-          <div className="mb-6">
-            <h2 className="text-md font-bold text-gray-800 bg-gray-100 p-2 rounded border border-gray-200 mb-2 uppercase text-xs tracking-wider">
-              2. Peças e Insumos
-            </h2>
-            <table className="w-full text-left text-sm border-collapse">
-              <thead>
-                <tr className="border-b text-gray-600">
-                  <th className="py-2">Descrição</th>
-                  <th className="py-2 text-center w-20">Qtd</th>
-                  <th className="py-2 text-right w-28">Val. Unit.</th>
-                  <th className="py-2 text-right w-28">Subtotal</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {pecas.map((item: ItemOS, index: number) => {
-                  const subtotal = (Number(item.quantidade) || 0) * (Number(item.valorUnitario) || 0);
-                  return (
-                    <tr key={index}>
-                      <td className="py-2">{item.descricao}</td>
-                      <td className="py-2 text-center">{item.quantidade}</td>
-                      <td className="py-2 text-right">R$ {Number(item.valorUnitario).toFixed(2)}</td>
-                      <td className="py-2 text-right font-medium">R$ {subtotal.toFixed(2)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        <div className="flex justify-end mb-8">
-          <div className="w-64 bg-gray-50 p-4 rounded-lg border border-gray-200 text-sm space-y-1">
-            <div className="flex justify-between text-gray-600">
-              <span>Total Serviços:</span>
-              <span>R$ {Number(os.totalServicos || 0).toFixed(2)}</span>
-            </div>
-            <div className="flex justify-between text-gray-600">
-              <span>Total Peças:</span>
-              <span>R$ {Number(os.totalPecas || 0).toFixed(2)}</span>
-            </div>
-            <div className="border-t pt-2 mt-2 flex justify-between text-base font-bold text-gray-900">
-              <span>Total Geral:</span>
-              <span className="text-blue-600 print:text-black">R$ {Number(os.valorTotal || 0).toFixed(2)}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-12 pt-8 border-t grid grid-cols-2 gap-8 text-center text-xs text-gray-600">
-          <div>
-            <div className="border-b border-gray-400 mb-2 w-3/4 mx-auto"></div>
-            <p>Assinatura do Cliente</p>
-          </div>
-          <div>
-            <div className="border-b border-gray-400 mb-2 w-3/4 mx-auto"></div>
-            <p>Responsável Técnico / Oficina</p>
-          </div>
-        </div>
-
-      </div>
-    </main>
+      {/* Componente do Formulário Web */}
+      <FormularioOS
+        id={id as string}
+        userData={userData}
+        isAdmin={isAdmin}
+        cliente={cliente}
+        setCliente={setCliente}
+        telefone={telefone}
+        setTelefone={setTelefone}
+        veiculo={veiculo}
+        setVeiculo={setVeiculo}
+        ano={ano}
+        setAno={setAno}
+        placa={placa}
+        setPlaca={setPlaca}
+        km={km}
+        setKm={setKm}
+        status={status}
+        setStatus={setStatus}
+        itens={itens}
+        adicionarItemManual={adicionarItemManual}
+        removerItem={removerItem}
+        atualizarItem={atualizarItem}
+        toggleItemCatalogo={toggleItemCatalogo}
+        totalServicos={totalServicos}
+        totalPecas={totalPecas}
+        valorTotal={valorTotal}
+        salvando={salvando}
+        handleSalvar={handleSalvar}
+        modalAberto={modalAberto}
+        setModalAberto={setModalAberto}
+        catalogoFiltrado={catalogoFiltrado}
+        buscaCatalogo={buscaCatalogo}
+        setBuscaCatalogo={setBuscaCatalogo}
+        defeitoRelatado={defeitoRelatado}
+        setDefeitoRelatado={setDefeitoRelatado}
+        obsMecanico={obsMecanico}
+        setObsMecanico={setObsMecanico}
+      />
+    </>
   );
 }
